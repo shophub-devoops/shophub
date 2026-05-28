@@ -12,6 +12,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -ldflags='-s -w' -o /out/shophub ./...
 
 FROM alpine:3.20 AS release
+# ca-certificates iz Alpine main repoa; pinning na verziju puca kad Alpine bumpne minor
+# hadolint ignore=DL3018
 RUN apk add --no-cache ca-certificates && \
     addgroup -S app && adduser -S app -G app
 COPY --from=builder /out/shophub /app/shophub
