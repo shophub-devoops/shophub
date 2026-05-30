@@ -11,10 +11,18 @@ import (
 	appsv1 "github.com/shophub-devoops/shop-operator/api/apps/v1"
 )
 
-// handlers carries the dependencies shared by all HTTP endpoints.
+// handlers carries the dependencies shared by all HTTP endpoints. The tenant
+// namespace is not a field — it comes from the authenticated caller's JWT
+// (set by the auth middleware) so each user only touches their own shops.
 type handlers struct {
-	kube      client.Client
-	namespace string
+	kube client.Client
+}
+
+// nsFromCtx returns the caller's tenant namespace, set by the auth middleware.
+func nsFromCtx(c *gin.Context) string {
+	v, _ := c.Get("namespace")
+	ns, _ := v.(string)
+	return ns
 }
 
 // createShopRequest is the payload for POST /api/shops.
@@ -62,7 +70,7 @@ func toResponse(s *appsv1.Shop) shopResponse {
 
 func (h *handlers) listShops(c *gin.Context) {
 	var list appsv1.ShopList
-	if err := h.kube.List(c.Request.Context(), &list, client.InNamespace(h.namespace)); err != nil {
+	if err := h.kube.List(c.Request.Context(), &list, client.InNamespace(nsFromCtx(c))); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "list shops: " + err.Error()})
 		return
 	}
@@ -75,7 +83,7 @@ func (h *handlers) listShops(c *gin.Context) {
 
 func (h *handlers) getShop(c *gin.Context) {
 	var shop appsv1.Shop
-	err := h.kube.Get(c.Request.Context(), client.ObjectKey{Namespace: h.namespace, Name: c.Param("name")}, &shop)
+	err := h.kube.Get(c.Request.Context(), client.ObjectKey{Namespace: nsFromCtx(c), Name: c.Param("name")}, &shop)
 	if apierrors.IsNotFound(err) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "shop not found"})
 		return
@@ -97,7 +105,7 @@ func (h *handlers) createShop(c *gin.Context) {
 	shop := &appsv1.Shop{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      req.Name,
-			Namespace: h.namespace,
+			Namespace: nsFromCtx(c),
 		},
 		Spec: appsv1.ShopSpec{
 			Title:         req.Title,
@@ -129,7 +137,7 @@ func (h *handlers) updateShop(c *gin.Context) {
 	}
 
 	var shop appsv1.Shop
-	err := h.kube.Get(c.Request.Context(), client.ObjectKey{Namespace: h.namespace, Name: c.Param("name")}, &shop)
+	err := h.kube.Get(c.Request.Context(), client.ObjectKey{Namespace: nsFromCtx(c), Name: c.Param("name")}, &shop)
 	if apierrors.IsNotFound(err) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "shop not found"})
 		return
@@ -162,7 +170,7 @@ func (h *handlers) updateShop(c *gin.Context) {
 
 func (h *handlers) deleteShop(c *gin.Context) {
 	shop := &appsv1.Shop{
-		ObjectMeta: metav1.ObjectMeta{Name: c.Param("name"), Namespace: h.namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: c.Param("name"), Namespace: nsFromCtx(c)},
 	}
 	err := h.kube.Delete(c.Request.Context(), shop)
 	if apierrors.IsNotFound(err) {
