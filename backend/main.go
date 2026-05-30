@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -26,7 +27,11 @@ import (
 
 func main() {
 	addr := getenv("LISTEN_ADDR", ":8080")
-	tenantNS := getenv("TENANT_NAMESPACE", "tenant-demo")
+	databaseURL := os.Getenv("DATABASE_URL")
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if databaseURL == "" || jwtSecret == "" {
+		log.Fatal("DATABASE_URL and JWT_SECRET are required")
+	}
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -41,7 +46,18 @@ func main() {
 		log.Fatalf("k8s client: %v", err)
 	}
 
-	h := &handlers{kube: kubeClient, namespace: tenantNS}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		log.Fatalf("db pool: %v", err)
+	}
+	defer pool.Close()
+	if err := ensureUsersSchema(ctx, pool); err != nil {
+		log.Fatalf("users schema: %v", err)
+	}
+
+	a := &auth{pool: pool, kube: kubeClient, secret: []byte(jwtSecret)}
+	h := &handlers{kube: kubeClient}
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -53,11 +69,17 @@ func main() {
 
 	api := r.Group("/api")
 	{
-		api.GET("/shops", h.listShops)
-		api.POST("/shops", h.createShop)
-		api.GET("/shops/:name", h.getShop)
-		api.PUT("/shops/:name", h.updateShop)
-		api.DELETE("/shops/:name", h.deleteShop)
+		api.POST("/auth/register", a.register)
+		api.POST("/auth/login", a.login)
+
+		// Shop management requires a valid JWT; each request is scoped to the
+		// caller's tenant namespace (set by the auth middleware).
+		shops := api.Group("/shops", a.middleware())
+		shops.GET("", h.listShops)
+		shops.POST("", h.createShop)
+		shops.GET("/:name", h.getShop)
+		shops.PUT("/:name", h.updateShop)
+		shops.DELETE("/:name", h.deleteShop)
 	}
 
 	srv := &http.Server{
@@ -67,7 +89,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("shophub backend listening on %s (tenant=%s)", addr, tenantNS)
+		log.Printf("shophub backend listening on %s", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server: %v", err)
 		}
