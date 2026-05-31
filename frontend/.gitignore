@@ -1,0 +1,9 @@
+node_modules
+dist
+*.tsbuildinfo
+# tsc -b can emit a compiled copy of the vite config beside the .ts — it shadows
+# the source and isn't meant to be committed.
+vite.config.js
+vite.config.d.ts
+# self-review loop artifacts
+render*.png
