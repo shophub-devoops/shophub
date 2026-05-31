@@ -38,15 +38,18 @@ function ShopCard({ shop, onDelete }: { shop: Shop; onDelete: (n: string) => voi
             <Database size={11} /> {shop.database}
           </span>
         </Badge>
-        {typeof shop.ready_replicas === 'number' && (
-          <Badge>{shop.ready_replicas} ready</Badge>
-        )}
       </div>
     </div>
   );
 }
 
-const EMPTY: NewShop = { name: '', title: '', availability: 'standard', database: 'postgres' };
+const EMPTY: NewShop = {
+  name: '',
+  title: '',
+  availability: 'standard',
+  database: 'postgres',
+  walletAddress: '',
+};
 
 function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [form, setForm] = useState<NewShop>(EMPTY);
@@ -124,6 +127,16 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
                 <option value="mongodb">MongoDB</option>
               </select>
             </div>
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[13px] font-medium text-fg/80">Wallet address</label>
+            <input
+              required
+              value={form.walletAddress}
+              onChange={(e) => setForm({ ...form, walletAddress: e.target.value })}
+              placeholder="0x… (where buyers send payment)"
+              className={field}
+            />
           </div>
           {error && <p className="text-sm text-red-400">{error}</p>}
           <button

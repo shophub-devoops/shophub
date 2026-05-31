@@ -17,9 +17,7 @@ export type Shop = {
   title: string;
   availability: 'standard' | 'high';
   database: 'postgres' | 'mongodb';
-  wallet_address?: string;
-  url?: string;
-  ready_replicas?: number;
+  walletAddress?: string;
 };
 
 export type NewShop = {
@@ -27,7 +25,7 @@ export type NewShop = {
   title: string;
   availability: 'standard' | 'high';
   database: 'postgres' | 'mongodb';
-  wallet_address?: string;
+  walletAddress: string;
 };
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
