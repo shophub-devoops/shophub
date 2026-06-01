@@ -18,6 +18,7 @@ export type Shop = {
   availability: 'standard' | 'high';
   database: 'postgres' | 'mongodb';
   walletAddress?: string;
+  url?: string;
 };
 
 export type NewShop = {

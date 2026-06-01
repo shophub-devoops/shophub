@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Database, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
+import { Database, ExternalLink, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
 import { api, token, type NewShop, type Shop } from '../lib/api';
 
 function Badge({ children, tone = 'default' }: { children: React.ReactNode; tone?: 'default' | 'accent' }) {
@@ -21,13 +21,26 @@ function ShopCard({ shop, onDelete }: { shop: Shop; onDelete: (n: string) => voi
             <div className="text-xs text-muted">{shop.name}</div>
           </div>
         </div>
-        <button
-          onClick={() => onDelete(shop.name)}
-          className="text-faint opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
-          title="Delete shop"
-        >
-          <Trash2 size={16} />
-        </button>
+        <div className="flex items-center gap-3">
+          {shop.url && (
+            <a
+              href={shop.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-xs font-medium text-accent-bright hover:underline"
+              title="Open storefront"
+            >
+              Open <ExternalLink size={13} />
+            </a>
+          )}
+          <button
+            onClick={() => onDelete(shop.name)}
+            className="text-faint opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
+            title="Delete shop"
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
       </div>
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <Badge tone={shop.availability === 'high' ? 'accent' : 'default'}>
