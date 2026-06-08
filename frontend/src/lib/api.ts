@@ -60,14 +60,14 @@ export const api = {
   // Web3 wallet sign-in (spec 1.1): fetch a nonce to sign, then submit the
   // signature for the backend to verify and issue a JWT.
   walletNonce: (address: string) =>
-    request<{ nonce: string; message: string }>('/api/auth/nonce', {
+    request<{ nonce: string; message: string; token: string }>('/api/auth/nonce', {
       method: 'POST',
       body: JSON.stringify({ address }),
     }),
-  walletLogin: (address: string, signature: string) =>
+  walletLogin: (address: string, signature: string, nonceToken: string) =>
     request<AuthResponse>('/api/auth/wallet', {
       method: 'POST',
-      body: JSON.stringify({ address, signature }),
+      body: JSON.stringify({ address, signature, token: nonceToken }),
     }),
   listShops: () => request<Shop[]>('/api/shops'),
   createShop: (shop: NewShop) =>
