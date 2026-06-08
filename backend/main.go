@@ -74,6 +74,9 @@ func main() {
 	{
 		api.POST("/auth/register", a.register)
 		api.POST("/auth/login", a.login)
+		// Web3 wallet sign-in (spec 1.1 optional): nonce -> sign in MetaMask -> verify.
+		api.POST("/auth/nonce", a.nonce)
+		api.POST("/auth/wallet", a.walletLogin)
 
 		// Shop management requires a valid JWT; each request is scoped to the
 		// caller's tenant namespace (set by the auth middleware).

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ShoppingBag } from 'lucide-react';
+import { ShoppingBag, Wallet } from 'lucide-react';
 import { api, token } from '../lib/api';
 
 export default function Login() {
@@ -21,6 +21,27 @@ export default function Login() {
       navigate('/dashboard');
     } catch (err) {
       setError((err as Error).message.replace(/^\d+ [^:]+:\s*/, '') || 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Web3 sign-in (spec 1.1): connect MetaMask, sign a server nonce, log in.
+  async function walletSignIn() {
+    setBusy(true);
+    setError(null);
+    try {
+      const eth = (window as { ethereum?: { request: (a: { method: string; params?: unknown[] }) => Promise<never> } }).ethereum;
+      if (!eth) throw new Error('MetaMask not found — install the browser extension.');
+      const accounts = (await eth.request({ method: 'eth_requestAccounts' })) as unknown as string[];
+      const address = accounts[0];
+      const { message } = await api.walletNonce(address);
+      const signature = (await eth.request({ method: 'personal_sign', params: [message, address] })) as unknown as string;
+      const res = await api.walletLogin(address, signature);
+      token.set(res.token);
+      navigate('/dashboard');
+    } catch (err) {
+      setError((err as Error).message.replace(/^\d+ [^:]+:\s*/, '') || 'Wallet sign-in failed');
     } finally {
       setBusy(false);
     }
@@ -82,6 +103,20 @@ export default function Login() {
               {busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}
             </button>
           </form>
+
+          <div className="my-5 flex items-center gap-3 text-xs text-faint">
+            <div className="h-px flex-1 bg-line" />
+            or
+            <div className="h-px flex-1 bg-line" />
+          </div>
+
+          <button
+            onClick={walletSignIn}
+            disabled={busy}
+            className="flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-line bg-surface text-[15px] font-medium text-fg transition-colors hover:border-accent-bright disabled:opacity-60"
+          >
+            <Wallet size={16} /> Continue with wallet
+          </button>
 
           <p className="mt-6 text-center text-sm text-muted">
             {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
