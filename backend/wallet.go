@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
@@ -27,47 +31,53 @@ import (
 
 const nonceTTL = 5 * time.Minute
 
-// nonceStore holds one-time login nonces per address, in memory. ShopHub runs a
-// single replica, so an in-memory store is sufficient; a multi-replica setup
-// would move this to the database or a signed stateless token.
-type nonceStore struct {
-	mu sync.Mutex
-	m  map[string]nonceEntry
-}
+// Login nonces are stateless: instead of storing them server-side, the nonce
+// endpoint hands the client an HMAC-signed token binding (address, nonce,
+// expiry). Step 2 returns the token, and any replica can verify it with the
+// shared signing secret — so wallet sign-in works across multiple ShopHub
+// replicas without a shared nonce store.
 
-type nonceEntry struct {
-	nonce string
-	exp   time.Time
-}
-
-func newNonceStore() *nonceStore { return &nonceStore{m: map[string]nonceEntry{}} }
-
-func (n *nonceStore) issue(addr string) (string, error) {
+// issueNonce returns a fresh random nonce plus a token that authenticates it:
+// base64url(address|nonce|expiry) "." hex(HMAC-SHA256(secret, payload)).
+func (a *auth) issueNonce(addr string) (nonce, tokenStr string, err error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		return "", err
+		return "", "", err
 	}
-	nonce := hex.EncodeToString(b)
-	n.mu.Lock()
-	n.m[addr] = nonceEntry{nonce: nonce, exp: time.Now().Add(nonceTTL)}
-	n.mu.Unlock()
-	return nonce, nil
+	nonce = hex.EncodeToString(b)
+	payload := fmt.Sprintf("%s|%s|%d", addr, nonce, time.Now().Add(nonceTTL).Unix())
+	tokenStr = base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + a.nonceMAC(payload)
+	return nonce, tokenStr, nil
 }
 
-// consume returns the stored nonce for addr and removes it (single use).
-func (n *nonceStore) consume(addr string) (string, bool) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	e, ok := n.m[addr]
-	if !ok || time.Now().After(e.exp) {
-		delete(n.m, addr)
+// verifyNonce validates the token's HMAC, bound address and expiry, returning
+// the nonce it carries. The MAC is compared in constant time.
+func (a *auth) verifyNonce(addr, tokenStr string) (nonce string, ok bool) {
+	enc, mac, found := strings.Cut(tokenStr, ".")
+	if !found {
 		return "", false
 	}
-	delete(n.m, addr)
-	return e.nonce, true
+	payload, err := base64.RawURLEncoding.DecodeString(enc)
+	if err != nil || !hmac.Equal([]byte(mac), []byte(a.nonceMAC(string(payload)))) {
+		return "", false
+	}
+	parts := strings.Split(string(payload), "|")
+	if len(parts) != 3 || !strings.EqualFold(parts[0], addr) {
+		return "", false
+	}
+	exp, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || time.Now().Unix() > exp {
+		return "", false
+	}
+	return parts[1], true
 }
 
-var nonces = newNonceStore()
+// nonceMAC is the HMAC-SHA256 of payload under the JWT signing secret, hex-encoded.
+func (a *auth) nonceMAC(payload string) string {
+	m := hmac.New(sha256.New, a.secret)
+	m.Write([]byte(payload))
+	return hex.EncodeToString(m.Sum(nil))
+}
 
 // signMessage is the exact text the wallet signs; must match on both sides.
 func signMessage(nonce string) string {
@@ -86,17 +96,19 @@ func (a *auth) nonce(c *gin.Context) {
 		return
 	}
 	addr := strings.ToLower(strings.TrimSpace(in.Address))
-	n, err := nonces.issue(addr)
+	n, tok, err := a.issueNonce(addr)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "generate nonce"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"nonce": n, "message": signMessage(n)})
+	c.JSON(http.StatusOK, gin.H{"nonce": n, "message": signMessage(n), "token": tok})
 }
 
 type walletRequest struct {
 	Address   string `json:"address" binding:"required"`
 	Signature string `json:"signature" binding:"required"`
+	// Token is the HMAC-signed nonce token from the /nonce response (step 1).
+	Token string `json:"token" binding:"required"`
 }
 
 // walletLogin verifies the signed nonce, then logs the wallet in (step 2):
@@ -109,9 +121,9 @@ func (a *auth) walletLogin(c *gin.Context) {
 	}
 	addr := strings.ToLower(strings.TrimSpace(in.Address))
 
-	nonce, ok := nonces.consume(addr)
+	nonce, ok := a.verifyNonce(addr, in.Token)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "nonce expired — request a new one"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "nonce expired or invalid — request a new one"})
 		return
 	}
 	if !verifySignature(addr, signMessage(nonce), in.Signature) {

@@ -35,9 +35,9 @@ export default function Login() {
       if (!eth) throw new Error('MetaMask not found — install the browser extension.');
       const accounts = (await eth.request({ method: 'eth_requestAccounts' })) as unknown as string[];
       const address = accounts[0];
-      const { message } = await api.walletNonce(address);
+      const { message, token: nonceToken } = await api.walletNonce(address);
       const signature = (await eth.request({ method: 'personal_sign', params: [message, address] })) as unknown as string;
-      const res = await api.walletLogin(address, signature);
+      const res = await api.walletLogin(address, signature, nonceToken);
       token.set(res.token);
       navigate('/dashboard');
     } catch (err) {
