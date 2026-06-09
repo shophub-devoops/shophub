@@ -57,7 +57,7 @@ func main() {
 		log.Fatalf("users schema: %v", err)
 	}
 
-	a := &auth{pool: pool, kube: kubeClient, secret: []byte(jwtSecret)}
+	a := &auth{pool: pool, kube: kubeClient, secret: []byte(jwtSecret), grafana: newGrafanaProvisionerFromEnv()}
 	h := &handlers{kube: kubeClient}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -86,6 +86,9 @@ func main() {
 		shops.GET("/:name", h.getShop)
 		shops.PUT("/:name", h.updateShop)
 		shops.DELETE("/:name", h.deleteShop)
+
+		// Per-tenant Grafana access: link + scoped login for the caller's org.
+		api.GET("/grafana", a.middleware(), a.grafanaInfo)
 	}
 
 	srv := &http.Server{

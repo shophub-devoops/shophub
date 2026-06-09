@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Database, ExternalLink, Pencil, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
-import { api, token, type EditShop, type NewShop, type Shop } from '../lib/api';
+import { Database, ExternalLink, LineChart, Pencil, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
+import { api, token, type EditShop, type GrafanaAccess, type NewShop, type Shop } from '../lib/api';
 
 function Badge({ children, tone = 'default' }: { children: React.ReactNode; tone?: 'default' | 'accent' }) {
   const cls = tone === 'accent' ? 'bg-accent/20 text-accent-bright' : 'bg-white/5 text-muted';
@@ -253,11 +253,69 @@ function EditModal({ shop, onClose, onSaved }: { shop: Shop; onClose: () => void
   );
 }
 
+// MetricsModal shows the tenant's own Grafana access: a link plus the scoped
+// Viewer login that only sees this tenant's dashboards (spec 4.1 optional).
+function MetricsModal({ onClose }: { onClose: () => void }) {
+  const [info, setInfo] = useState<GrafanaAccess | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .grafana()
+      .then(setInfo)
+      .catch((e) => setError((e as Error).message.replace(/^\d+ [^:]+:\s*/, '')));
+  }, []);
+
+  const row = 'flex items-center justify-between gap-3 rounded-lg border border-line bg-surface px-3.5 py-2.5 text-sm';
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-6 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-card p-6">
+        <div className="flex items-center justify-between">
+          <h2 className="font-serif text-xl font-medium">Your metrics</h2>
+          <button onClick={onClose} className="text-faint hover:text-fg">
+            <X size={18} />
+          </button>
+        </div>
+        <p className="mt-2 text-sm text-muted">
+          A private Grafana organization that shows only your shops' dashboards.
+        </p>
+        {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
+        {info && (
+          <div className="mt-5 space-y-2.5">
+            <div className={row}>
+              <span className="text-muted">Username</span>
+              <code className="text-fg">{info.login}</code>
+            </div>
+            <div className={row}>
+              <span className="text-muted">Password</span>
+              <code className="text-fg">{info.password}</code>
+            </div>
+            <div className={row}>
+              <span className="text-muted">Organization</span>
+              <code className="text-fg">{info.org}</code>
+            </div>
+            <a
+              href={info.url}
+              target="_blank"
+              rel="noreferrer"
+              className="btn-gradient mt-2 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-[15px] font-medium"
+            >
+              Open Grafana <ExternalLink size={15} />
+            </a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [shops, setShops] = useState<Shop[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<Shop | null>(null);
+  const [showMetrics, setShowMetrics] = useState(false);
   const navigate = useNavigate();
 
   function load() {
@@ -290,9 +348,17 @@ export default function Dashboard() {
             <span className="text-faint">/</span>
             <span className="text-muted">production</span>
           </div>
-          <button onClick={logout} className="text-sm font-medium text-muted transition-colors hover:text-fg">
-            Sign out
-          </button>
+          <div className="flex items-center gap-5">
+            <button
+              onClick={() => setShowMetrics(true)}
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-muted transition-colors hover:text-fg"
+            >
+              <LineChart size={15} /> Metrics
+            </button>
+            <button onClick={logout} className="text-sm font-medium text-muted transition-colors hover:text-fg">
+              Sign out
+            </button>
+          </div>
         </div>
       </header>
 
@@ -337,6 +403,7 @@ export default function Dashboard() {
 
       {creating && <CreateModal onClose={() => setCreating(false)} onCreated={load} />}
       {editing && <EditModal shop={editing} onClose={() => setEditing(null)} onSaved={load} />}
+      {showMetrics && <MetricsModal onClose={() => setShowMetrics(false)} />}
     </div>
   );
 }
