@@ -25,15 +25,19 @@ import (
 const tokenTTL = 24 * time.Hour
 
 // auth carries auth dependencies: the user store (Postgres), the kube client
-// (to create each user's tenant namespace), and the JWT signing secret.
+// (to create each user's tenant namespace), the JWT signing secret, and an
+// optional Grafana provisioner (per-tenant org + scoped login).
 type auth struct {
-	pool   *pgxpool.Pool
-	kube   client.Client
-	secret []byte
+	pool    *pgxpool.Pool
+	kube    client.Client
+	secret  []byte
+	grafana *grafanaProvisioner
 }
 
 // ensureUsersSchema creates the users table on startup. Each user owns one
-// tenant namespace where their Shop CRs live.
+// tenant namespace where their Shop CRs live. The grafana_* columns hold the
+// per-tenant Grafana login provisioned at registration (empty when Grafana
+// access is not configured).
 func ensureUsersSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS users (
@@ -42,7 +46,9 @@ func ensureUsersSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			password_hash text NOT NULL,
 			namespace     text UNIQUE NOT NULL,
 			created_at    timestamptz NOT NULL DEFAULT now()
-		)`)
+		);
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS grafana_login    text NOT NULL DEFAULT '';
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS grafana_password text NOT NULL DEFAULT '';`)
 	return err
 }
 
@@ -101,6 +107,11 @@ func (a *auth) register(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "create namespace: " + err.Error()})
 		return
 	}
+
+	// Provision a per-tenant Grafana org + Viewer login so the user can view
+	// only their own dashboards (spec 4.1 optional). Best-effort: a Grafana
+	// hiccup must not fail registration — the account can be re-provisioned.
+	a.provisionGrafana(c.Request.Context(), ns, email)
 
 	token, err := a.sign(email, ns)
 	if err != nil {

@@ -37,6 +37,13 @@ export type EditShop = {
   walletAddress?: string;
 };
 
+export type GrafanaAccess = {
+  url: string;
+  login: string;
+  password: string;
+  org: string;
+};
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -84,4 +91,7 @@ export const api = {
     request<Shop>(`/api/shops/${name}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteShop: (name: string) =>
     request<void>(`/api/shops/${name}`, { method: 'DELETE' }),
+  // Per-tenant Grafana access: link + scoped login showing only this tenant's
+  // dashboards (spec 4.1 optional).
+  grafana: () => request<GrafanaAccess>('/api/grafana'),
 };
