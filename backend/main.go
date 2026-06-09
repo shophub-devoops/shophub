@@ -1,8 +1,8 @@
 // Package main is the ShopHub backend: a thin REST API that creates and
 // manages Shop CRs in the cluster on behalf of authenticated users.
-// Authentication is intentionally absent in this skeleton (Faza 4 plan
-// is JWT email/password; deferred). For now all requests target a single
-// tenant namespace controlled by TENANT_NAMESPACE.
+// Users authenticate with email/password (or a Web3 wallet signature) and
+// receive a JWT; each user is scoped to their own tenant namespace, embedded
+// in the token, so every Shop operation is isolated per user.
 package main
 
 import (

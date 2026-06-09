@@ -29,6 +29,14 @@ export type NewShop = {
   walletAddress: string;
 };
 
+// EditShop is the mutable subset of a Shop. Database is fixed at creation
+// (changing it would destroy data) so it isn't editable.
+export type EditShop = {
+  title?: string;
+  availability?: 'standard' | 'high';
+  walletAddress?: string;
+};
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -72,6 +80,8 @@ export const api = {
   listShops: () => request<Shop[]>('/api/shops'),
   createShop: (shop: NewShop) =>
     request<Shop>('/api/shops', { method: 'POST', body: JSON.stringify(shop) }),
+  updateShop: (name: string, patch: EditShop) =>
+    request<Shop>(`/api/shops/${name}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteShop: (name: string) =>
     request<void>(`/api/shops/${name}`, { method: 'DELETE' }),
 };

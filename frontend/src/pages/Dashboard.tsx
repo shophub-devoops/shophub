@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Database, ExternalLink, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
-import { api, token, type NewShop, type Shop } from '../lib/api';
+import { Database, ExternalLink, Pencil, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
+import { api, token, type EditShop, type NewShop, type Shop } from '../lib/api';
 
 function Badge({ children, tone = 'default' }: { children: React.ReactNode; tone?: 'default' | 'accent' }) {
   const cls = tone === 'accent' ? 'bg-accent/20 text-accent-bright' : 'bg-white/5 text-muted';
   return <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${cls}`}>{children}</span>;
 }
 
-function ShopCard({ shop, onDelete }: { shop: Shop; onDelete: (n: string) => void }) {
+function ShopCard({ shop, onEdit, onDelete }: { shop: Shop; onEdit: (s: Shop) => void; onDelete: (n: string) => void }) {
   return (
     <div className="group rounded-xl border border-line bg-card p-5 transition-colors hover:border-white/20">
       <div className="flex items-start justify-between">
@@ -33,6 +33,13 @@ function ShopCard({ shop, onDelete }: { shop: Shop; onDelete: (n: string) => voi
               Open <ExternalLink size={13} />
             </a>
           )}
+          <button
+            onClick={() => onEdit(shop)}
+            className="text-faint opacity-0 transition-opacity hover:text-accent-bright group-hover:opacity-100"
+            title="Edit shop"
+          >
+            <Pencil size={15} />
+          </button>
           <button
             onClick={() => onDelete(shop.name)}
             className="text-faint opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
@@ -165,10 +172,92 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
   );
 }
 
+function EditModal({ shop, onClose, onSaved }: { shop: Shop; onClose: () => void; onSaved: () => void }) {
+  const [form, setForm] = useState<Required<EditShop>>({
+    title: shop.title,
+    availability: shop.availability,
+    walletAddress: shop.walletAddress ?? '',
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateShop(shop.name, form);
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError((err as Error).message.replace(/^\d+ [^:]+:\s*/, ''));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const field = 'w-full rounded-lg border border-line bg-surface px-3.5 py-2.5 text-sm outline-none focus:border-accent-bright';
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-6 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-card p-6">
+        <div className="flex items-center justify-between">
+          <h2 className="font-serif text-xl font-medium">Edit {shop.name}</h2>
+          <button onClick={onClose} className="text-faint hover:text-fg">
+            <X size={18} />
+          </button>
+        </div>
+        <form onSubmit={submit} className="mt-5 space-y-4">
+          <div>
+            <label className="mb-1.5 block text-[13px] font-medium text-fg/80">Title</label>
+            <input
+              required
+              value={form.title}
+              onChange={(e) => setForm({ ...form, title: e.target.value })}
+              className={field}
+            />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[13px] font-medium text-fg/80">Availability</label>
+            <select
+              value={form.availability}
+              onChange={(e) => setForm({ ...form, availability: e.target.value as Shop['availability'] })}
+              className={field}
+            >
+              <option value="standard">Standard</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[13px] font-medium text-fg/80">Wallet address</label>
+            <input
+              required
+              value={form.walletAddress}
+              onChange={(e) => setForm({ ...form, walletAddress: e.target.value })}
+              placeholder="0x… (where buyers send payment)"
+              className={field}
+            />
+          </div>
+          <p className="text-xs text-faint">Database ({shop.database}) is fixed at creation and can't be changed.</p>
+          {error && <p className="text-sm text-red-400">{error}</p>}
+          <button
+            type="submit"
+            disabled={busy}
+            className="btn-gradient h-11 w-full rounded-lg text-[15px] font-medium disabled:opacity-60"
+          >
+            {busy ? 'Saving…' : 'Save changes'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [shops, setShops] = useState<Shop[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<Shop | null>(null);
   const navigate = useNavigate();
 
   function load() {
@@ -240,13 +329,14 @@ export default function Dashboard() {
         ) : (
           <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {shops.map((s) => (
-              <ShopCard key={s.name} shop={s} onDelete={remove} />
+              <ShopCard key={s.name} shop={s} onEdit={setEditing} onDelete={remove} />
             ))}
           </div>
         )}
       </main>
 
       {creating && <CreateModal onClose={() => setCreating(false)} onCreated={load} />}
+      {editing && <EditModal shop={editing} onClose={() => setEditing(null)} onSaved={load} />}
     </div>
   );
 }
