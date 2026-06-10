@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +26,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "github.com/shophub-devoops/shop-operator/api/apps/v1"
+	notifyv1 "github.com/shophub-devoops/shop-operator/api/notify/v1"
+	paymentsv1 "github.com/shophub-devoops/shop-operator/api/payments/v1"
 )
 
 func main() {
@@ -37,6 +41,8 @@ func main() {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(notifyv1.AddToScheme(scheme))
+	utilruntime.Must(paymentsv1.AddToScheme(scheme))
 
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
@@ -58,7 +64,16 @@ func main() {
 	}
 
 	a := &auth{pool: pool, kube: kubeClient, secret: []byte(jwtSecret), grafana: newGrafanaProvisionerFromEnv()}
-	h := &handlers{kube: kubeClient}
+	h := &handlers{
+		kube: kubeClient,
+		// Platform-level Discord setup (one bot + one guild, configured by the
+		// chart). Empty guild disables the per-shop Discord channel option.
+		discord: discordConfig{
+			guildID:       os.Getenv("DISCORD_GUILD_ID"),
+			botSecretName: os.Getenv("DISCORD_BOT_TOKEN_SECRET_NAME"),
+			botSecretNS:   os.Getenv("DISCORD_BOT_TOKEN_SECRET_NAMESPACE"),
+		},
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -70,13 +85,17 @@ func main() {
 	r.GET("/probe/readiness", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
+	// Per-IP limit on the unauthenticated auth endpoints. Registration creates
+	// a tenant namespace per call, so it must not be free to spam.
+	authLimit := newRateLimit(0.1, 5) // 5 quick requests, then one per 10s
+
 	api := r.Group("/api")
 	{
-		api.POST("/auth/register", a.register)
-		api.POST("/auth/login", a.login)
+		api.POST("/auth/register", authLimit.middleware(), a.register)
+		api.POST("/auth/login", authLimit.middleware(), a.login)
 		// Web3 wallet sign-in (spec 1.1 optional): nonce -> sign in MetaMask -> verify.
-		api.POST("/auth/nonce", a.nonce)
-		api.POST("/auth/wallet", a.walletLogin)
+		api.POST("/auth/nonce", authLimit.middleware(), a.nonce)
+		api.POST("/auth/wallet", authLimit.middleware(), a.walletLogin)
 
 		// Shop management requires a valid JWT; each request is scoped to the
 		// caller's tenant namespace (set by the auth middleware).
@@ -86,10 +105,20 @@ func main() {
 		shops.GET("/:name", h.getShop)
 		shops.PUT("/:name", h.updateShop)
 		shops.DELETE("/:name", h.deleteShop)
+		// Admin credentials for the shop's own dashboard (operator-generated).
+		shops.GET("/:name/admin-credentials", h.getShopAdminCredentials)
+
+		// Wallet generation via the operator's Wallet CRD: creates a keypair
+		// on the tenant's behalf and returns the public address.
+		api.POST("/wallets", a.middleware(), h.createWallet)
 
 		// Per-tenant Grafana access: link + scoped login for the caller's org.
 		api.GET("/grafana", a.middleware(), a.grafanaInfo)
 	}
+
+	// Serve the built ShopHub SPA (bundled into the unified image) so the
+	// platform is reachable at "/" from the cluster ingress, not just the API.
+	mountFrontend(r)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -122,6 +151,28 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// mountFrontend serves the built frontend SPA from WEB_DIR (populated in the
+// unified container image). No-op when no bundled UI is present (local
+// API-only runs / tests). Non-API GETs fall back to index.html so client-side
+// routes (/login, /dashboard) work on refresh.
+func mountFrontend(r *gin.Engine) {
+	webDir := getenv("WEB_DIR", "/app/web")
+	index := filepath.Join(webDir, "index.html")
+	if _, err := os.Stat(index); err != nil {
+		return
+	}
+	r.Static("/assets", filepath.Join(webDir, "assets"))
+	r.NoRoute(func(c *gin.Context) {
+		p := c.Request.URL.Path
+		if c.Request.Method != http.MethodGet ||
+			strings.HasPrefix(p, "/api") || strings.HasPrefix(p, "/metrics") || strings.HasPrefix(p, "/probe") {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.File(index)
+	})
 }
 
 func requestLogger() gin.HandlerFunc {
