@@ -27,6 +27,15 @@ export type NewShop = {
   availability: 'standard' | 'high';
   database: 'postgres' | 'mongodb';
   walletAddress: string;
+  // Opt-in: provision a Discord notification channel for this shop's alerts.
+  discordChannel?: boolean;
+};
+
+// AdminCredentials is the operator-generated login for the shop's own admin
+// dashboard (storefront /admin).
+export type AdminCredentials = {
+  password: string;
+  loginUrl: string;
 };
 
 // EditShop is the mutable subset of a Shop. Database is fixed at creation
@@ -91,6 +100,15 @@ export const api = {
     request<Shop>(`/api/shops/${name}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteShop: (name: string) =>
     request<void>(`/api/shops/${name}`, { method: 'DELETE' }),
+  // Operator-generated admin login for the shop's own dashboard.
+  adminCredentials: (name: string) =>
+    request<AdminCredentials>(`/api/shops/${name}/admin-credentials`),
+  // Generate a wallet via the operator's Wallet CRD; returns the address.
+  createWallet: () =>
+    request<{ name: string; address?: string; error?: string }>('/api/wallets', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
   // Per-tenant Grafana access: link + scoped login showing only this tenant's
   // dashboards (spec 4.1 optional).
   grafana: () => request<GrafanaAccess>('/api/grafana'),

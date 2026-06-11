@@ -1,14 +1,24 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Database, ExternalLink, LineChart, Pencil, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
-import { api, token, type EditShop, type GrafanaAccess, type NewShop, type Shop } from '../lib/api';
+import { Database, ExternalLink, KeyRound, LineChart, Pencil, Plus, ShoppingBag, Trash2, Wand2, X } from 'lucide-react';
+import { api, token, type AdminCredentials, type EditShop, type GrafanaAccess, type NewShop, type Shop } from '../lib/api';
 
 function Badge({ children, tone = 'default' }: { children: React.ReactNode; tone?: 'default' | 'accent' }) {
   const cls = tone === 'accent' ? 'bg-accent/20 text-accent-bright' : 'bg-white/5 text-muted';
   return <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${cls}`}>{children}</span>;
 }
 
-function ShopCard({ shop, onEdit, onDelete }: { shop: Shop; onEdit: (s: Shop) => void; onDelete: (n: string) => void }) {
+function ShopCard({
+  shop,
+  onEdit,
+  onDelete,
+  onAdmin,
+}: {
+  shop: Shop;
+  onEdit: (s: Shop) => void;
+  onDelete: (n: string) => void;
+  onAdmin: (s: Shop) => void;
+}) {
   return (
     <div className="group rounded-xl border border-line bg-card p-5 transition-colors hover:border-white/20">
       <div className="flex items-start justify-between">
@@ -33,6 +43,13 @@ function ShopCard({ shop, onEdit, onDelete }: { shop: Shop; onEdit: (s: Shop) =>
               Open <ExternalLink size={13} />
             </a>
           )}
+          <button
+            onClick={() => onAdmin(shop)}
+            className="text-faint opacity-0 transition-opacity hover:text-accent-bright group-hover:opacity-100"
+            title="Shop admin credentials"
+          >
+            <KeyRound size={15} />
+          </button>
           <button
             onClick={() => onEdit(shop)}
             className="text-faint opacity-0 transition-opacity hover:text-accent-bright group-hover:opacity-100"
@@ -75,6 +92,25 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const [form, setForm] = useState<NewShop>(EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [generating, setGenerating] = useState(false);
+
+  // Provision a Wallet CR via the operator and fill in the resulting address.
+  async function generateWallet() {
+    setGenerating(true);
+    setError(null);
+    try {
+      const w = await api.createWallet();
+      if (w.address) {
+        setForm((f) => ({ ...f, walletAddress: w.address! }));
+      } else {
+        setError(w.error ?? 'Wallet is being provisioned — try again shortly.');
+      }
+    } catch (err) {
+      setError((err as Error).message.replace(/^\d+ [^:]+:\s*/, ''));
+    } finally {
+      setGenerating(false);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -150,14 +186,34 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
           </div>
           <div>
             <label className="mb-1.5 block text-[13px] font-medium text-fg/80">Wallet address</label>
-            <input
-              required
-              value={form.walletAddress}
-              onChange={(e) => setForm({ ...form, walletAddress: e.target.value })}
-              placeholder="0x… (where buyers send payment)"
-              className={field}
-            />
+            <div className="flex gap-2">
+              <input
+                required
+                value={form.walletAddress}
+                onChange={(e) => setForm({ ...form, walletAddress: e.target.value })}
+                placeholder="0x… (where buyers send payment)"
+                className={field}
+              />
+              <button
+                type="button"
+                onClick={generateWallet}
+                disabled={generating}
+                title="Generate a wallet for me"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line px-3 text-[13px] font-medium text-muted transition-colors hover:text-fg disabled:opacity-60"
+              >
+                <Wand2 size={14} /> {generating ? '…' : 'Generate'}
+              </button>
+            </div>
           </div>
+          <label className="flex items-center gap-2.5 text-sm text-muted">
+            <input
+              type="checkbox"
+              checked={form.discordChannel ?? false}
+              onChange={(e) => setForm({ ...form, discordChannel: e.target.checked })}
+              className="h-4 w-4 rounded border-line bg-surface accent-[#531AFF]"
+            />
+            Create a Discord notification channel for this shop's alerts
+          </label>
           {error && <p className="text-sm text-red-400">{error}</p>}
           <button
             type="submit"
@@ -253,6 +309,57 @@ function EditModal({ shop, onClose, onSaved }: { shop: Shop; onClose: () => void
   );
 }
 
+// AdminCredsModal shows the operator-generated password for the shop's own
+// admin dashboard (storefront /admin), plus a direct link to the login page.
+function AdminCredsModal({ shop, onClose }: { shop: Shop; onClose: () => void }) {
+  const [creds, setCreds] = useState<AdminCredentials | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .adminCredentials(shop.name)
+      .then(setCreds)
+      .catch((e) => setError((e as Error).message.replace(/^\d+ [^:]+:\s*/, '')));
+  }, [shop.name]);
+
+  const row = 'flex items-center justify-between gap-3 rounded-lg border border-line bg-surface px-3.5 py-2.5 text-sm';
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-6 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-card p-6">
+        <div className="flex items-center justify-between">
+          <h2 className="font-serif text-xl font-medium">Shop admin — {shop.name}</h2>
+          <button onClick={onClose} className="text-faint hover:text-fg">
+            <X size={18} />
+          </button>
+        </div>
+        <p className="mt-2 text-sm text-muted">
+          Use this password to sign into your storefront's admin dashboard and manage items and orders.
+        </p>
+        {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
+        {creds && (
+          <div className="mt-5 space-y-2.5">
+            <div className={row}>
+              <span className="text-muted">Password</span>
+              <code className="select-all text-fg">{creds.password}</code>
+            </div>
+            {creds.loginUrl && (
+              <a
+                href={creds.loginUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="btn-gradient mt-2 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-[15px] font-medium"
+              >
+                Open admin login <ExternalLink size={15} />
+              </a>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // MetricsModal shows the tenant's own Grafana access: a link plus the scoped
 // Viewer login that only sees this tenant's dashboards (spec 4.1 optional).
 function MetricsModal({ onClose }: { onClose: () => void }) {
@@ -315,6 +422,7 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<Shop | null>(null);
+  const [adminFor, setAdminFor] = useState<Shop | null>(null);
   const [showMetrics, setShowMetrics] = useState(false);
   const navigate = useNavigate();
 
@@ -395,7 +503,7 @@ export default function Dashboard() {
         ) : (
           <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {shops.map((s) => (
-              <ShopCard key={s.name} shop={s} onEdit={setEditing} onDelete={remove} />
+              <ShopCard key={s.name} shop={s} onEdit={setEditing} onDelete={remove} onAdmin={setAdminFor} />
             ))}
           </div>
         )}
@@ -403,6 +511,7 @@ export default function Dashboard() {
 
       {creating && <CreateModal onClose={() => setCreating(false)} onCreated={load} />}
       {editing && <EditModal shop={editing} onClose={() => setEditing(null)} onSaved={load} />}
+      {adminFor && <AdminCredsModal shop={adminFor} onClose={() => setAdminFor(null)} />}
       {showMetrics && <MetricsModal onClose={() => setShowMetrics(false)} />}
     </div>
   );
