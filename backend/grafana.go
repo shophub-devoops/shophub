@@ -135,17 +135,21 @@ func (g *grafanaProvisioner) ensureOrg(ctx context.Context, name string) (int64,
 
 // grafanaInfo returns the logged-in tenant's Grafana access details (link +
 // credentials) so the UI can offer a "view my metrics" button. The password was
-// generated and stored at registration.
+// generated and stored at registration; the account itself is re-asserted in
+// Grafana on every call because Grafana's database is ephemeral (no
+// persistence) — a Grafana restart wipes orgs and users, so we lazily
+// re-provision instead of handing out credentials for an account that no
+// longer exists.
 func (a *auth) grafanaInfo(c *gin.Context) {
 	if a.grafana == nil {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": "grafana access is not configured"})
 		return
 	}
 	ns := nsFromCtx(c)
-	var login, password string
+	var email, login, password string
 	err := a.pool.QueryRow(c.Request.Context(),
-		`SELECT grafana_login, grafana_password FROM users WHERE namespace = $1`, ns).Scan(&login, &password)
-	if err == pgx.ErrNoRows || login == "" {
+		`SELECT email, grafana_login, grafana_password FROM users WHERE namespace = $1`, ns).Scan(&email, &login, &password)
+	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no grafana account for this tenant"})
 		return
 	}
@@ -153,6 +157,25 @@ func (a *auth) grafanaInfo(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "lookup grafana creds: " + err.Error()})
 		return
 	}
+
+	if login == "" {
+		// Never provisioned (e.g. Grafana was down at registration) — do it now.
+		a.provisionGrafana(c.Request.Context(), ns, email)
+		err = a.pool.QueryRow(c.Request.Context(),
+			`SELECT grafana_login, grafana_password FROM users WHERE namespace = $1`, ns).Scan(&login, &password)
+		if err != nil || login == "" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "grafana account could not be provisioned — try again later"})
+			return
+		}
+	} else if err := a.grafana.ensureUser(c.Request.Context(), ns, login, password); err != nil {
+		// Re-assert the account with the stored password (idempotent; recreates
+		// it after a Grafana restart). Failure here means the credentials we'd
+		// return may not work, so surface it instead of handing them out.
+		log.Printf("grafana: re-provision user for %s: %v", ns, err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "grafana is unavailable — try again later"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"url":      a.grafana.externalURL,
 		"login":    login,

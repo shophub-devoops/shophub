@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
 
 // fakeGrafana records org/user provisioning so we can assert ensureUser creates
@@ -91,6 +93,55 @@ func TestEnsureUserCreatesScopedAccount(t *testing.T) {
 	}
 	if got := fake.createdUser["a@b.c"]; got != orgID {
 		t.Errorf("user created under org %d, want tenant org %d", got, orgID)
+	}
+}
+
+// TestGrafanaInfoReprovisionsAfterWipe guards the ephemeral-Grafana case: a
+// Grafana restart wipes orgs and users, so /api/grafana must recreate the
+// tenant's account (with the stored password) instead of returning credentials
+// for an account that no longer exists.
+func TestGrafanaInfoReprovisionsAfterWipe(t *testing.T) {
+	fake := newFakeGrafana()
+	srv := fake.server()
+	defer srv.Close()
+
+	a := newTestAuth(t)
+	a.grafana = &grafanaProvisioner{apiURL: srv.URL, externalURL: "http://grafana.example", user: "admin", pass: "pw", http: srv.Client()}
+
+	r := gin.New()
+	r.POST("/api/auth/register", a.register)
+	r.GET("/api/grafana", a.middleware(), a.grafanaInfo)
+
+	// Registration provisions the account.
+	w := do(r, http.MethodPost, "/api/auth/register", "", creds("wipe@test.local"))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register = %d (body: %s)", w.Code, w.Body.String())
+	}
+	var reg struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &reg); err != nil {
+		t.Fatalf("decode register: %v", err)
+	}
+
+	// Simulate a Grafana restart wiping its ephemeral database.
+	fake.mu.Lock()
+	fake.orgsByName = map[string]int64{}
+	fake.createdUser = map[string]int64{}
+	fake.mu.Unlock()
+
+	w = do(r, http.MethodGet, "/api/grafana", reg.Token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("grafanaInfo after wipe = %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.createdUser) != 1 {
+		t.Errorf("user not recreated after wipe: %+v", fake.createdUser)
+	}
+	if len(fake.orgsByName) != 1 {
+		t.Errorf("org not recreated after wipe: %+v", fake.orgsByName)
 	}
 }
 
