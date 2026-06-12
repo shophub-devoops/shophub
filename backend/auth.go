@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -16,9 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -100,10 +98,9 @@ func (a *auth) register(c *gin.Context) {
 		return
 	}
 
-	// Materialize the tenant namespace (idempotent).
-	if err := a.kube.Create(c.Request.Context(), &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: ns},
-	}); err != nil && !apierrors.IsAlreadyExists(err) {
+	// Materialize the tenant namespace (idempotent). On failure the user row
+	// already exists; login re-runs ensureNamespace, so the account self-heals.
+	if err := a.ensureNamespace(c.Request.Context(), ns); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "create namespace: " + err.Error()})
 		return
 	}
@@ -144,6 +141,14 @@ func (a *auth) login(c *gin.Context) {
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.Password)) != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
 		return
+	}
+
+	// Re-assert the tenant namespace so an account whose namespace creation
+	// failed at registration (or was deleted out-of-band) heals on next login.
+	// Best-effort: a transient API error shouldn't block the login itself —
+	// shop operations will surface it if the namespace is really gone.
+	if err := a.ensureNamespace(c.Request.Context(), ns); err != nil {
+		log.Printf("ensure namespace %s on login: %v", ns, err)
 	}
 
 	token, err := a.sign(email, ns)
