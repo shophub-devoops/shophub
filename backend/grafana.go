@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -63,9 +66,14 @@ func (a *auth) provisionGrafana(ctx context.Context, ns, email string) {
 		log.Printf("grafana: provision user for %s: %v", ns, err)
 		return
 	}
+	enc, err := encryptGrafanaPassword(a.secret, password)
+	if err != nil {
+		log.Printf("grafana: encrypt password for %s: %v", ns, err)
+		return
+	}
 	if _, err := a.pool.Exec(ctx,
 		`UPDATE users SET grafana_login = $1, grafana_password = $2 WHERE namespace = $3`,
-		email, password, ns); err != nil {
+		email, enc, ns); err != nil {
 		log.Printf("grafana: store creds for %s: %v", ns, err)
 	}
 }
@@ -167,10 +175,20 @@ func (a *auth) grafanaInfo(c *gin.Context) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "grafana account could not be provisioned — try again later"})
 			return
 		}
-	} else if err := a.grafana.ensureUser(c.Request.Context(), ns, login, password); err != nil {
-		// Re-assert the account with the stored password (idempotent; recreates
-		// it after a Grafana restart). Failure here means the credentials we'd
-		// return may not work, so surface it instead of handing them out.
+	}
+
+	// The stored password is encrypted at rest; decrypt before using it.
+	plain, err := decryptGrafanaPassword(a.secret, password)
+	if err != nil {
+		log.Printf("grafana: decrypt password for %s: %v", ns, err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "grafana account needs re-provisioning — try again later"})
+		return
+	}
+
+	// Re-assert the account with the stored password (idempotent; recreates it
+	// after a Grafana restart). Failure here means the credentials we'd return
+	// may not work, so surface it instead of handing them out.
+	if err := a.grafana.ensureUser(c.Request.Context(), ns, login, plain); err != nil {
 		log.Printf("grafana: re-provision user for %s: %v", ns, err)
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "grafana is unavailable — try again later"})
 		return
@@ -179,7 +197,7 @@ func (a *auth) grafanaInfo(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"url":      a.grafana.externalURL,
 		"login":    login,
-		"password": password,
+		"password": plain,
 		"org":      ns,
 	})
 }
@@ -240,4 +258,61 @@ func generatePassword() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// grafana credentials are stored encrypted at rest: the tenant's Grafana
+// password must be shown back to them (so it can't be a one-way hash), but
+// keeping it as plaintext in the users table would leak every tenant's Grafana
+// access on a DB dump. AES-256-GCM with a key derived from the JWT signing
+// secret — which the backend already holds — means no extra secret to manage.
+
+// grafanaCipherKey derives a 32-byte AES key from the JWT signing secret. The
+// prefix domain-separates it from the secret's other HMAC/JWT uses.
+func grafanaCipherKey(secret []byte) [32]byte {
+	return sha256.Sum256(append([]byte("shophub-grafana-pw:"), secret...))
+}
+
+// encryptGrafanaPassword seals plaintext with AES-256-GCM and returns
+// hex(nonce || ciphertext).
+func encryptGrafanaPassword(secret []byte, plaintext string) (string, error) {
+	key := grafanaCipherKey(secret)
+	gcm, err := newGCM(key)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(gcm.Seal(nonce, nonce, []byte(plaintext), nil)), nil
+}
+
+// decryptGrafanaPassword reverses encryptGrafanaPassword.
+func decryptGrafanaPassword(secret []byte, encHex string) (string, error) {
+	key := grafanaCipherKey(secret)
+	gcm, err := newGCM(key)
+	if err != nil {
+		return "", err
+	}
+	raw, err := hex.DecodeString(encHex)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) < gcm.NonceSize() {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	nonce, ct := raw[:gcm.NonceSize()], raw[gcm.NonceSize():]
+	out, err := gcm.Open(nil, nonce, ct, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func newGCM(key [32]byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
 }

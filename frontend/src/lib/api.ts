@@ -19,6 +19,8 @@ export type Shop = {
   database: 'postgres' | 'mongodb';
   walletAddress?: string;
   url?: string;
+  // Whether this shop already has a Discord notification channel.
+  discordChannel?: boolean;
 };
 
 export type NewShop = {
@@ -44,6 +46,8 @@ export type EditShop = {
   title?: string;
   availability?: 'standard' | 'high';
   walletAddress?: string;
+  // Enable-only: opt an existing shop into a Discord notification channel.
+  discordChannel?: boolean;
 };
 
 export type GrafanaAccess = {

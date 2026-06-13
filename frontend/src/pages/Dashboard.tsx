@@ -229,11 +229,12 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
 }
 
 function EditModal({ shop, onClose, onSaved }: { shop: Shop; onClose: () => void; onSaved: () => void }) {
-  const [form, setForm] = useState<Required<EditShop>>({
+  const [form, setForm] = useState({
     title: shop.title,
     availability: shop.availability,
     walletAddress: shop.walletAddress ?? '',
   });
+  const [enableDiscord, setEnableDiscord] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -242,7 +243,9 @@ function EditModal({ shop, onClose, onSaved }: { shop: Shop; onClose: () => void
     setBusy(true);
     setError(null);
     try {
-      await api.updateShop(shop.name, form);
+      const patch: EditShop = { ...form };
+      if (enableDiscord) patch.discordChannel = true;
+      await api.updateShop(shop.name, patch);
       onSaved();
       onClose();
     } catch (err) {
@@ -294,6 +297,19 @@ function EditModal({ shop, onClose, onSaved }: { shop: Shop; onClose: () => void
               className={field}
             />
           </div>
+          {shop.discordChannel ? (
+            <p className="text-xs text-faint">Discord notification channel is enabled for this shop.</p>
+          ) : (
+            <label className="flex items-center gap-2.5 text-sm text-muted">
+              <input
+                type="checkbox"
+                checked={enableDiscord}
+                onChange={(e) => setEnableDiscord(e.target.checked)}
+                className="h-4 w-4 rounded border-line bg-surface accent-[#531AFF]"
+              />
+              Enable a Discord notification channel for this shop's alerts
+            </label>
+          )}
           <p className="text-xs text-faint">Database ({shop.database}) is fixed at creation and can't be changed.</p>
           {error && <p className="text-sm text-red-400">{error}</p>}
           <button
