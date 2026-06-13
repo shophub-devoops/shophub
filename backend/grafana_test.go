@@ -145,6 +145,34 @@ func TestGrafanaInfoReprovisionsAfterWipe(t *testing.T) {
 	}
 }
 
+// TestGrafanaPasswordEncryptionRoundTrip guards the at-rest encryption (the
+// stored Grafana password must round-trip but never sit in the DB as plaintext,
+// and must not decrypt under a different key).
+func TestGrafanaPasswordEncryptionRoundTrip(t *testing.T) {
+	secret := []byte("test-secret")
+	const pw = "s3cr3t-grafana-pw"
+
+	enc, err := encryptGrafanaPassword(secret, pw)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	if strings.Contains(enc, pw) {
+		t.Fatalf("ciphertext leaks plaintext: %q", enc)
+	}
+
+	got, err := decryptGrafanaPassword(secret, enc)
+	if err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	if got != pw {
+		t.Fatalf("round-trip = %q, want %q", got, pw)
+	}
+
+	if _, err := decryptGrafanaPassword([]byte("other-secret"), enc); err == nil {
+		t.Fatal("decrypt with wrong key should fail")
+	}
+}
+
 func TestEnsureUserIdempotentOnExisting(t *testing.T) {
 	fake := newFakeGrafana()
 	srv := fake.server()
