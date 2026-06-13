@@ -45,6 +45,10 @@ type updateShopRequest struct {
 	Title         *string `json:"title,omitempty"`
 	Availability  *string `json:"availability,omitempty" binding:"omitempty,oneof=standard high"`
 	WalletAddress *string `json:"walletAddress,omitempty"`
+	// DiscordChannel, when true, opts an existing shop into a Discord
+	// notification channel (enable-only — the create flow handles the initial
+	// opt-in). No-op when the shop already has one.
+	DiscordChannel *bool `json:"discordChannel,omitempty"`
 }
 
 // shopResponse is the public view of a Shop CR. Database kind is fixed at
@@ -58,18 +62,22 @@ type shopResponse struct {
 	WalletAddress string `json:"walletAddress"`
 	URL           string `json:"url,omitempty"`
 	ReadyReplicas int32  `json:"readyReplicas"`
+	// DiscordChannel reports whether this shop already has a Discord notification
+	// channel, so the UI can offer the enable toggle only when it doesn't.
+	DiscordChannel bool `json:"discordChannel"`
 }
 
 func toResponse(s *appsv1.Shop) shopResponse {
 	return shopResponse{
-		Name:          s.Name,
-		Namespace:     s.Namespace,
-		Title:         s.Spec.Title,
-		Availability:  string(s.Spec.Availability),
-		Database:      string(s.Spec.Database),
-		WalletAddress: s.Spec.WalletAddress,
-		URL:           s.Status.URL,
-		ReadyReplicas: s.Status.ReadyReplicas,
+		Name:           s.Name,
+		Namespace:      s.Namespace,
+		Title:          s.Spec.Title,
+		Availability:   string(s.Spec.Availability),
+		Database:       string(s.Spec.Database),
+		WalletAddress:  s.Spec.WalletAddress,
+		URL:            s.Status.URL,
+		ReadyReplicas:  s.Status.ReadyReplicas,
+		DiscordChannel: s.Spec.DiscordWebhookSecretRef != nil,
 	}
 }
 
@@ -187,6 +195,22 @@ func (h *handlers) updateShop(c *gin.Context) {
 	}
 	if req.WalletAddress != nil {
 		shop.Spec.WalletAddress = *req.WalletAddress
+	}
+
+	// Opt-in to a Discord channel after creation. Enable-only: the create flow
+	// handles the initial opt-in, and we never tear one down here. No-op when the
+	// shop already has a webhook ref.
+	if req.DiscordChannel != nil && *req.DiscordChannel && shop.Spec.DiscordWebhookSecretRef == nil {
+		if !h.discord.enabled() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "discord notifications are not configured on this platform"})
+			return
+		}
+		secretName, err := h.ensureDiscordChannel(c.Request.Context(), &shop)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "enable discord channel: " + err.Error()})
+			return
+		}
+		shop.Spec.DiscordWebhookSecretRef = &corev1.SecretReference{Name: secretName}
 	}
 
 	if err := h.kube.Update(c.Request.Context(), &shop); err != nil {
