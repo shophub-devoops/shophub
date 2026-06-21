@@ -1,4 +1,4 @@
-package main
+package httpapi
 
 import (
 	"context"
@@ -25,20 +25,20 @@ import (
 //     CR (channel + webhook on the platform's Discord guild) that the Shop's
 //     AlertmanagerConfig routes alerts to.
 
-// walletWaitTimeout bounds how long createWallet waits for the operator to
+// walletWaitTimeout bounds how long CreateWallet waits for the operator to
 // publish the generated address before telling the client to retry.
 const walletWaitTimeout = 10 * time.Second
 
-// discordConfig is the platform-level Discord setup (one bot, one guild),
-// injected by the chart. Empty guildID disables the feature.
-type discordConfig struct {
-	guildID         string
-	botSecretName   string
-	botSecretNS     string
+// DiscordConfig is the platform-level Discord setup (one bot, one guild),
+// injected by the chart. Empty GuildID disables the feature.
+type DiscordConfig struct {
+	GuildID       string
+	BotSecretName string
+	BotSecretNS   string
 }
 
-func (d discordConfig) enabled() bool {
-	return d.guildID != "" && d.botSecretName != ""
+func (d DiscordConfig) enabled() bool {
+	return d.GuildID != "" && d.BotSecretName != ""
 }
 
 // createWalletRequest names the Wallet CR; a random suffix is used when empty.
@@ -46,10 +46,10 @@ type createWalletRequest struct {
 	Name string `json:"name"`
 }
 
-// createWallet creates a Wallet CR in the caller's tenant namespace and waits
+// CreateWallet creates a Wallet CR in the caller's tenant namespace and waits
 // (bounded) for the operator to generate the keypair and publish the address.
 // The user can then point a Shop at the returned address.
-func (h *handlers) createWallet(c *gin.Context) {
+func (h *Handlers) CreateWallet(c *gin.Context) {
 	ns := nsFromCtx(c)
 
 	var req createWalletRequest
@@ -69,7 +69,7 @@ func (h *handlers) createWallet(c *gin.Context) {
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec:       paymentsv1.WalletSpec{Network: paymentsv1.NetworkSepolia},
 	}
-	if err := h.kube.Create(c.Request.Context(), wallet); err != nil && !apierrors.IsAlreadyExists(err) {
+	if err := h.Kube.Create(c.Request.Context(), wallet); err != nil && !apierrors.IsAlreadyExists(err) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "create wallet: " + err.Error()})
 		return
 	}
@@ -87,7 +87,7 @@ func (h *handlers) createWallet(c *gin.Context) {
 
 // waitForWalletAddress polls the Wallet CR until the operator publishes
 // status.address or the bounded wait expires.
-func (h *handlers) waitForWalletAddress(ctx context.Context, ns, name string) (string, error) {
+func (h *Handlers) waitForWalletAddress(ctx context.Context, ns, name string) (string, error) {
 	deadline := time.NewTimer(walletWaitTimeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(500 * time.Millisecond)
@@ -95,7 +95,7 @@ func (h *handlers) waitForWalletAddress(ctx context.Context, ns, name string) (s
 
 	for {
 		var w paymentsv1.Wallet
-		if err := h.kube.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &w); err == nil && w.Status.Address != "" {
+		if err := h.Kube.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &w); err == nil && w.Status.Address != "" {
 			return w.Status.Address, nil
 		}
 		select {
@@ -110,10 +110,10 @@ func (h *handlers) waitForWalletAddress(ctx context.Context, ns, name string) (s
 
 // ensureDiscordChannel creates a DiscordChannel CR for the shop (channel +
 // webhook on the platform guild, reconciled by the operator) and returns the
-// webhook Secret name the Shop CR should reference. The CR is owned by the
-// Shop so deleting the shop tears the Discord channel down too (the
-// DiscordChannel controller's finalizer deletes the channel on the guild).
-func (h *handlers) ensureDiscordChannel(ctx context.Context, shop *appsv1.Shop) (string, error) {
+// webhook Secret name the Shop CR should reference. The CR is owned by the Shop
+// so deleting the shop tears the Discord channel down too (the DiscordChannel
+// controller's finalizer deletes the channel on the guild).
+func (h *Handlers) ensureDiscordChannel(ctx context.Context, shop *appsv1.Shop) (string, error) {
 	yes := true
 	ch := &notifyv1.DiscordChannel{
 		ObjectMeta: metav1.ObjectMeta{
@@ -128,15 +128,15 @@ func (h *handlers) ensureDiscordChannel(ctx context.Context, shop *appsv1.Shop) 
 			}},
 		},
 		Spec: notifyv1.DiscordChannelSpec{
-			GuildID: h.discord.guildID,
+			GuildID: h.Discord.GuildID,
 			Name:    shop.Name,
 			BotTokenRef: corev1.SecretReference{
-				Name:      h.discord.botSecretName,
-				Namespace: h.discord.botSecretNS,
+				Name:      h.Discord.BotSecretName,
+				Namespace: h.Discord.BotSecretNS,
 			},
 		},
 	}
-	if err := h.kube.Create(ctx, ch); err != nil && !apierrors.IsAlreadyExists(err) {
+	if err := h.Kube.Create(ctx, ch); err != nil && !apierrors.IsAlreadyExists(err) {
 		return "", err
 	}
 	// The DiscordChannel controller writes the webhook URL into <name>-webhook;

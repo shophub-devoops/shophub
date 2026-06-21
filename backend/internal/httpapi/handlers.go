@@ -1,4 +1,8 @@
-package main
+// Package httpapi wires the ShopHub backend's shop-management endpoints: each
+// authenticated user creates/edits/deletes Shop CRs in their own tenant
+// namespace (taken from the JWT by the auth middleware), plus the wallet and
+// Discord-channel CRD flows.
+package httpapi
 
 import (
 	"net/http"
@@ -12,12 +16,12 @@ import (
 	appsv1 "github.com/shophub-devoops/shop-operator/api/apps/v1"
 )
 
-// handlers carries the dependencies shared by all HTTP endpoints. The tenant
-// namespace is not a field — it comes from the authenticated caller's JWT
-// (set by the auth middleware) so each user only touches their own shops.
-type handlers struct {
-	kube    client.Client
-	discord discordConfig
+// Handlers carries the dependencies shared by all HTTP endpoints. The tenant
+// namespace is not a field — it comes from the authenticated caller's JWT (set
+// by the auth middleware) so each user only touches their own shops.
+type Handlers struct {
+	Kube    client.Client
+	Discord DiscordConfig
 }
 
 // nsFromCtx returns the caller's tenant namespace, set by the auth middleware.
@@ -27,9 +31,9 @@ func nsFromCtx(c *gin.Context) string {
 	return ns
 }
 
-// createShopRequest is the payload for POST /api/shops. DiscordChannel opts
-// the shop into a dedicated notification channel on the platform's Discord
-// guild (provisioned via the operator's DiscordChannel CRD).
+// createShopRequest is the payload for POST /api/shops. DiscordChannel opts the
+// shop into a dedicated notification channel on the platform's Discord guild
+// (provisioned via the operator's DiscordChannel CRD).
 type createShopRequest struct {
 	Name           string `json:"name" binding:"required"`
 	Title          string `json:"title" binding:"required"`
@@ -39,8 +43,8 @@ type createShopRequest struct {
 	DiscordChannel bool   `json:"discordChannel"`
 }
 
-// updateShopRequest is the payload for PUT /api/shops/:name. Name is bound
-// to the URL param, not the body.
+// updateShopRequest is the payload for PUT /api/shops/:name. Name is bound to
+// the URL param, not the body.
 type updateShopRequest struct {
 	Title         *string `json:"title,omitempty"`
 	Availability  *string `json:"availability,omitempty" binding:"omitempty,oneof=standard high"`
@@ -81,9 +85,9 @@ func toResponse(s *appsv1.Shop) shopResponse {
 	}
 }
 
-func (h *handlers) listShops(c *gin.Context) {
+func (h *Handlers) ListShops(c *gin.Context) {
 	var list appsv1.ShopList
-	if err := h.kube.List(c.Request.Context(), &list, client.InNamespace(nsFromCtx(c))); err != nil {
+	if err := h.Kube.List(c.Request.Context(), &list, client.InNamespace(nsFromCtx(c))); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "list shops: " + err.Error()})
 		return
 	}
@@ -94,9 +98,9 @@ func (h *handlers) listShops(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-func (h *handlers) getShop(c *gin.Context) {
+func (h *Handlers) GetShop(c *gin.Context) {
 	var shop appsv1.Shop
-	err := h.kube.Get(c.Request.Context(), client.ObjectKey{Namespace: nsFromCtx(c), Name: c.Param("name")}, &shop)
+	err := h.Kube.Get(c.Request.Context(), client.ObjectKey{Namespace: nsFromCtx(c), Name: c.Param("name")}, &shop)
 	if apierrors.IsNotFound(err) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "shop not found"})
 		return
@@ -108,13 +112,13 @@ func (h *handlers) getShop(c *gin.Context) {
 	c.JSON(http.StatusOK, toResponse(&shop))
 }
 
-func (h *handlers) createShop(c *gin.Context) {
+func (h *Handlers) CreateShop(c *gin.Context) {
 	var req createShopRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.DiscordChannel && !h.discord.enabled() {
+	if req.DiscordChannel && !h.Discord.enabled() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "discord notifications are not configured on this platform"})
 		return
 	}
@@ -131,7 +135,7 @@ func (h *handlers) createShop(c *gin.Context) {
 			WalletAddress: req.WalletAddress,
 		},
 	}
-	if err := h.kube.Create(c.Request.Context(), shop); err != nil {
+	if err := h.Kube.Create(c.Request.Context(), shop); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			c.JSON(http.StatusConflict, gin.H{"error": "shop already exists"})
 			return
@@ -158,7 +162,7 @@ func (h *handlers) createShop(c *gin.Context) {
 			return
 		}
 		shop.Spec.DiscordWebhookSecretRef = &corev1.SecretReference{Name: secretName}
-		if err := h.kube.Update(c.Request.Context(), shop); err != nil {
+		if err := h.Kube.Update(c.Request.Context(), shop); err != nil {
 			c.JSON(http.StatusCreated, gin.H{
 				"shop":    toResponse(shop),
 				"warning": "shop created, but linking discord webhook failed: " + err.Error(),
@@ -169,7 +173,7 @@ func (h *handlers) createShop(c *gin.Context) {
 	c.JSON(http.StatusCreated, toResponse(shop))
 }
 
-func (h *handlers) updateShop(c *gin.Context) {
+func (h *Handlers) UpdateShop(c *gin.Context) {
 	var req updateShopRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -177,7 +181,7 @@ func (h *handlers) updateShop(c *gin.Context) {
 	}
 
 	var shop appsv1.Shop
-	err := h.kube.Get(c.Request.Context(), client.ObjectKey{Namespace: nsFromCtx(c), Name: c.Param("name")}, &shop)
+	err := h.Kube.Get(c.Request.Context(), client.ObjectKey{Namespace: nsFromCtx(c), Name: c.Param("name")}, &shop)
 	if apierrors.IsNotFound(err) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "shop not found"})
 		return
@@ -201,7 +205,7 @@ func (h *handlers) updateShop(c *gin.Context) {
 	// handles the initial opt-in, and we never tear one down here. No-op when the
 	// shop already has a webhook ref.
 	if req.DiscordChannel != nil && *req.DiscordChannel && shop.Spec.DiscordWebhookSecretRef == nil {
-		if !h.discord.enabled() {
+		if !h.Discord.enabled() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "discord notifications are not configured on this platform"})
 			return
 		}
@@ -213,7 +217,7 @@ func (h *handlers) updateShop(c *gin.Context) {
 		shop.Spec.DiscordWebhookSecretRef = &corev1.SecretReference{Name: secretName}
 	}
 
-	if err := h.kube.Update(c.Request.Context(), &shop); err != nil {
+	if err := h.Kube.Update(c.Request.Context(), &shop); err != nil {
 		if apierrors.IsConflict(err) {
 			c.JSON(http.StatusConflict, gin.H{"error": "conflict — refetch and retry"})
 			return
@@ -224,16 +228,16 @@ func (h *handlers) updateShop(c *gin.Context) {
 	c.JSON(http.StatusOK, toResponse(&shop))
 }
 
-// getShopAdminCredentials returns the shop's admin password (generated by the
+// GetShopAdminCredentials returns the shop's admin password (generated by the
 // operator into the <shop>-admin Secret) so the owner can sign into their
 // storefront's admin dashboard. Scoped to the caller's tenant namespace like
 // every other shop operation.
-func (h *handlers) getShopAdminCredentials(c *gin.Context) {
+func (h *Handlers) GetShopAdminCredentials(c *gin.Context) {
 	ns := nsFromCtx(c)
 	name := c.Param("name")
 
 	var shop appsv1.Shop
-	err := h.kube.Get(c.Request.Context(), client.ObjectKey{Namespace: ns, Name: name}, &shop)
+	err := h.Kube.Get(c.Request.Context(), client.ObjectKey{Namespace: ns, Name: name}, &shop)
 	if apierrors.IsNotFound(err) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "shop not found"})
 		return
@@ -244,7 +248,7 @@ func (h *handlers) getShopAdminCredentials(c *gin.Context) {
 	}
 
 	sec := &corev1.Secret{}
-	err = h.kube.Get(c.Request.Context(), client.ObjectKey{Namespace: ns, Name: name + "-admin"}, sec)
+	err = h.Kube.Get(c.Request.Context(), client.ObjectKey{Namespace: ns, Name: name + "-admin"}, sec)
 	if apierrors.IsNotFound(err) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "admin credentials not provisioned yet — try again shortly"})
 		return
@@ -264,11 +268,11 @@ func (h *handlers) getShopAdminCredentials(c *gin.Context) {
 	})
 }
 
-func (h *handlers) deleteShop(c *gin.Context) {
+func (h *Handlers) DeleteShop(c *gin.Context) {
 	shop := &appsv1.Shop{
 		ObjectMeta: metav1.ObjectMeta{Name: c.Param("name"), Namespace: nsFromCtx(c)},
 	}
-	err := h.kube.Delete(c.Request.Context(), shop)
+	err := h.Kube.Delete(c.Request.Context(), shop)
 	if apierrors.IsNotFound(err) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "shop not found"})
 		return

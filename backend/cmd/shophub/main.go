@@ -1,8 +1,8 @@
-// Package main is the ShopHub backend: a thin REST API that creates and
-// manages Shop CRs in the cluster on behalf of authenticated users.
-// Users authenticate with email/password (or a Web3 wallet signature) and
-// receive a JWT; each user is scoped to their own tenant namespace, embedded
-// in the token, so every Shop operation is isolated per user.
+// Command shophub is the ShopHub backend: a REST API that creates and manages
+// Shop CRs in the cluster on behalf of authenticated users. Users authenticate
+// with email/password (or a Web3 wallet signature) and receive a JWT; each user
+// is scoped to their own tenant namespace, embedded in the token, so every Shop
+// operation is isolated per user.
 package main
 
 import (
@@ -28,6 +28,11 @@ import (
 	appsv1 "github.com/shophub-devoops/shop-operator/api/apps/v1"
 	notifyv1 "github.com/shophub-devoops/shop-operator/api/notify/v1"
 	paymentsv1 "github.com/shophub-devoops/shop-operator/api/payments/v1"
+
+	"github.com/shophub-devoops/shophub/backend/internal/auth"
+	"github.com/shophub-devoops/shophub/backend/internal/grafana"
+	"github.com/shophub-devoops/shophub/backend/internal/httpapi"
+	"github.com/shophub-devoops/shophub/backend/internal/observability"
 )
 
 func main() {
@@ -59,61 +64,61 @@ func main() {
 		log.Fatalf("db pool: %v", err)
 	}
 	defer pool.Close()
-	if err := ensureUsersSchema(ctx, pool); err != nil {
+	if err := auth.EnsureUsersSchema(ctx, pool); err != nil {
 		log.Fatalf("users schema: %v", err)
 	}
 
-	a := &auth{pool: pool, kube: kubeClient, secret: []byte(jwtSecret), grafana: newGrafanaProvisionerFromEnv()}
-	h := &handlers{
-		kube: kubeClient,
+	a := &auth.Auth{Pool: pool, Kube: kubeClient, Secret: []byte(jwtSecret), Grafana: grafana.NewProvisionerFromEnv()}
+	h := &httpapi.Handlers{
+		Kube: kubeClient,
 		// Platform-level Discord setup (one bot + one guild, configured by the
 		// chart). Empty guild disables the per-shop Discord channel option.
-		discord: discordConfig{
-			guildID:       os.Getenv("DISCORD_GUILD_ID"),
-			botSecretName: os.Getenv("DISCORD_BOT_TOKEN_SECRET_NAME"),
-			botSecretNS:   os.Getenv("DISCORD_BOT_TOKEN_SECRET_NAMESPACE"),
+		Discord: httpapi.DiscordConfig{
+			GuildID:       os.Getenv("DISCORD_GUILD_ID"),
+			BotSecretName: os.Getenv("DISCORD_BOT_TOKEN_SECRET_NAME"),
+			BotSecretNS:   os.Getenv("DISCORD_BOT_TOKEN_SECRET_NAMESPACE"),
 		},
 	}
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
-	r.Use(requestLogger())
-	r.Use(metricsMiddleware())
+	r.Use(observability.RequestLogger())
+	r.Use(observability.Middleware())
 
 	r.GET("/probe/liveness", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	r.GET("/probe/readiness", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	// Per-IP limit on the unauthenticated auth endpoints. Registration creates
-	// a tenant namespace per call, so it must not be free to spam.
-	authLimit := newRateLimit(0.1, 5) // 5 quick requests, then one per 10s
+	// Per-IP limit on the unauthenticated auth endpoints. Registration creates a
+	// tenant namespace per call, so it must not be free to spam.
+	authLimit := auth.NewRateLimit(0.1, 5) // 5 quick requests, then one per 10s
 
 	api := r.Group("/api")
 	{
-		api.POST("/auth/register", authLimit.middleware(), a.register)
-		api.POST("/auth/login", authLimit.middleware(), a.login)
+		api.POST("/auth/register", authLimit.Middleware(), a.Register)
+		api.POST("/auth/login", authLimit.Middleware(), a.Login)
 		// Web3 wallet sign-in (spec 1.1 optional): nonce -> sign in MetaMask -> verify.
-		api.POST("/auth/nonce", authLimit.middleware(), a.nonce)
-		api.POST("/auth/wallet", authLimit.middleware(), a.walletLogin)
+		api.POST("/auth/nonce", authLimit.Middleware(), a.Nonce)
+		api.POST("/auth/wallet", authLimit.Middleware(), a.WalletLogin)
 
 		// Shop management requires a valid JWT; each request is scoped to the
 		// caller's tenant namespace (set by the auth middleware).
-		shops := api.Group("/shops", a.middleware())
-		shops.GET("", h.listShops)
-		shops.POST("", h.createShop)
-		shops.GET("/:name", h.getShop)
-		shops.PUT("/:name", h.updateShop)
-		shops.DELETE("/:name", h.deleteShop)
+		shops := api.Group("/shops", a.Middleware())
+		shops.GET("", h.ListShops)
+		shops.POST("", h.CreateShop)
+		shops.GET("/:name", h.GetShop)
+		shops.PUT("/:name", h.UpdateShop)
+		shops.DELETE("/:name", h.DeleteShop)
 		// Admin credentials for the shop's own dashboard (operator-generated).
-		shops.GET("/:name/admin-credentials", h.getShopAdminCredentials)
+		shops.GET("/:name/admin-credentials", h.GetShopAdminCredentials)
 
-		// Wallet generation via the operator's Wallet CRD: creates a keypair
-		// on the tenant's behalf and returns the public address.
-		api.POST("/wallets", a.middleware(), h.createWallet)
+		// Wallet generation via the operator's Wallet CRD: creates a keypair on
+		// the tenant's behalf and returns the public address.
+		api.POST("/wallets", a.Middleware(), h.CreateWallet)
 
 		// Per-tenant Grafana access: link + scoped login for the caller's org.
-		api.GET("/grafana", a.middleware(), a.grafanaInfo)
+		api.GET("/grafana", a.Middleware(), a.GrafanaInfo)
 	}
 
 	// Serve the built ShopHub SPA (bundled into the unified image) so the
@@ -154,9 +159,9 @@ func getenv(key, fallback string) string {
 }
 
 // mountFrontend serves the built frontend SPA from WEB_DIR (populated in the
-// unified container image). No-op when no bundled UI is present (local
-// API-only runs / tests). Non-API GETs fall back to index.html so client-side
-// routes (/login, /dashboard) work on refresh.
+// unified container image). No-op when no bundled UI is present (local API-only
+// runs / tests). Non-API GETs fall back to index.html so client-side routes
+// (/login, /dashboard) work on refresh.
 func mountFrontend(r *gin.Engine) {
 	webDir := getenv("WEB_DIR", "/app/web")
 	index := filepath.Join(webDir, "index.html")
@@ -173,12 +178,4 @@ func mountFrontend(r *gin.Engine) {
 		}
 		c.File(index)
 	})
-}
-
-func requestLogger() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		c.Next()
-		log.Printf("%s %s -> %d (%s)", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), time.Since(start))
-	}
 }
