@@ -1,4 +1,8 @@
-package main
+// Package auth handles ShopHub user identity: email/password and Web3 wallet
+// sign-in, JWT issuance, the per-request auth middleware, and provisioning each
+// user's tenant namespace. The JWT carries the tenant namespace so the shop
+// handlers can scope every operation to the caller.
+package auth
 
 import (
 	"context"
@@ -18,25 +22,27 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/shophub-devoops/shophub/backend/internal/grafana"
 )
 
 const tokenTTL = 24 * time.Hour
 
-// auth carries auth dependencies: the user store (Postgres), the kube client
-// (to create each user's tenant namespace), the JWT signing secret, and an
-// optional Grafana provisioner (per-tenant org + scoped login).
-type auth struct {
-	pool    *pgxpool.Pool
-	kube    client.Client
-	secret  []byte
-	grafana *grafanaProvisioner
+// Auth carries auth dependencies: the user store (Postgres), the kube client (to
+// create each user's tenant namespace), the JWT signing secret, and an optional
+// Grafana provisioner (per-tenant org + scoped login).
+type Auth struct {
+	Pool    *pgxpool.Pool
+	Kube    client.Client
+	Secret  []byte
+	Grafana *grafana.Provisioner
 }
 
-// ensureUsersSchema creates the users table on startup. Each user owns one
+// EnsureUsersSchema creates the users table on startup. Each user owns one
 // tenant namespace where their Shop CRs live. The grafana_* columns hold the
 // per-tenant Grafana login provisioned at registration (empty when Grafana
 // access is not configured).
-func ensureUsersSchema(ctx context.Context, pool *pgxpool.Pool) error {
+func EnsureUsersSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS users (
 			id            bigserial PRIMARY KEY,
@@ -55,16 +61,23 @@ type credentials struct {
 	Password string `json:"password" binding:"required,min=8"`
 }
 
-// claims embeds the user's tenant namespace so the Shop handlers can scope
-// every operation to the caller without another DB lookup.
+// claims embeds the user's tenant namespace so the Shop handlers can scope every
+// operation to the caller without another DB lookup.
 type claims struct {
 	Namespace string `json:"ns"`
 	jwt.RegisteredClaims
 }
 
-// register creates a user and their own tenant namespace (full per-user
+// nsFromCtx returns the caller's tenant namespace, set by Middleware.
+func nsFromCtx(c *gin.Context) string {
+	v, _ := c.Get("namespace")
+	ns, _ := v.(string)
+	return ns
+}
+
+// Register creates a user and their own tenant namespace (full per-user
 // isolation), then returns a JWT so the client is logged in immediately.
-func (a *auth) register(c *gin.Context) {
+func (a *Auth) Register(c *gin.Context) {
 	var in credentials
 	if err := c.ShouldBindJSON(&in); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -84,9 +97,9 @@ func (a *auth) register(c *gin.Context) {
 		return
 	}
 
-	// Insert the user first so a duplicate email fails cleanly, before we
-	// create any cluster resources.
-	_, err = a.pool.Exec(c.Request.Context(),
+	// Insert the user first so a duplicate email fails cleanly, before we create
+	// any cluster resources.
+	_, err = a.Pool.Exec(c.Request.Context(),
 		`INSERT INTO users (email, password_hash, namespace) VALUES ($1, $2, $3)`,
 		email, string(hash), ns)
 	if isUniqueViolation(err) {
@@ -118,8 +131,8 @@ func (a *auth) register(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"token": token, "namespace": ns})
 }
 
-// login verifies credentials and issues a JWT carrying the user's namespace.
-func (a *auth) login(c *gin.Context) {
+// Login verifies credentials and issues a JWT carrying the user's namespace.
+func (a *Auth) Login(c *gin.Context) {
 	var in credentials
 	if err := c.ShouldBindJSON(&in); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -128,7 +141,7 @@ func (a *auth) login(c *gin.Context) {
 	email := strings.ToLower(strings.TrimSpace(in.Email))
 
 	var hash, ns string
-	err := a.pool.QueryRow(c.Request.Context(),
+	err := a.Pool.QueryRow(c.Request.Context(),
 		`SELECT password_hash, namespace FROM users WHERE email = $1`, email).Scan(&hash, &ns)
 	if errors.Is(err, pgx.ErrNoRows) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
@@ -145,8 +158,6 @@ func (a *auth) login(c *gin.Context) {
 
 	// Re-assert the tenant namespace so an account whose namespace creation
 	// failed at registration (or was deleted out-of-band) heals on next login.
-	// Best-effort: a transient API error shouldn't block the login itself —
-	// shop operations will surface it if the namespace is really gone.
 	if err := a.ensureNamespace(c.Request.Context(), ns); err != nil {
 		log.Printf("ensure namespace %s on login: %v", ns, err)
 	}
@@ -159,7 +170,7 @@ func (a *auth) login(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"token": token, "namespace": ns})
 }
 
-func (a *auth) sign(email, ns string) (string, error) {
+func (a *Auth) sign(email, ns string) (string, error) {
 	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims{
 		Namespace: ns,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -168,12 +179,12 @@ func (a *auth) sign(email, ns string) (string, error) {
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	})
-	return t.SignedString(a.secret)
+	return t.SignedString(a.Secret)
 }
 
-// middleware verifies the Bearer token and stores the caller's namespace in the
+// Middleware verifies the Bearer token and stores the caller's namespace in the
 // gin context; the Shop handlers read it to scope their operations per tenant.
-func (a *auth) middleware() gin.HandlerFunc {
+func (a *Auth) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
 		if !ok {
@@ -185,7 +196,7 @@ func (a *auth) middleware() gin.HandlerFunc {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 			}
-			return a.secret, nil
+			return a.Secret, nil
 		})
 		if err != nil || !tok.Valid || cl.Namespace == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})

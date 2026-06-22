@@ -1,4 +1,5 @@
-package main
+// Package observability holds the ShopHub backend's metrics and request logging.
+package observability
 
 import (
 	"strconv"
@@ -27,9 +28,9 @@ var (
 	)
 )
 
-// metricsMiddleware records request count and latency for the /metrics endpoint
-// that the chart's ServiceMonitor scrapes.
-func metricsMiddleware() gin.HandlerFunc {
+// Middleware records request count and latency for the /metrics endpoint that
+// the chart's ServiceMonitor scrapes.
+func Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		c.Next()

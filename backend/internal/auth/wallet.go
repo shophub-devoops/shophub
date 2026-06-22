@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"context"
@@ -39,7 +39,7 @@ const nonceTTL = 5 * time.Minute
 
 // issueNonce returns a fresh random nonce plus a token that authenticates it:
 // base64url(address|nonce|expiry) "." hex(HMAC-SHA256(secret, payload)).
-func (a *auth) issueNonce(addr string) (nonce, tokenStr string, err error) {
+func (a *Auth) issueNonce(addr string) (nonce, tokenStr string, err error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", "", err
@@ -52,7 +52,7 @@ func (a *auth) issueNonce(addr string) (nonce, tokenStr string, err error) {
 
 // verifyNonce validates the token's HMAC, bound address and expiry, returning
 // the nonce it carries. The MAC is compared in constant time.
-func (a *auth) verifyNonce(addr, tokenStr string) (nonce string, ok bool) {
+func (a *Auth) verifyNonce(addr, tokenStr string) (nonce string, ok bool) {
 	enc, mac, found := strings.Cut(tokenStr, ".")
 	if !found {
 		return "", false
@@ -73,8 +73,8 @@ func (a *auth) verifyNonce(addr, tokenStr string) (nonce string, ok bool) {
 }
 
 // nonceMAC is the HMAC-SHA256 of payload under the JWT signing secret, hex-encoded.
-func (a *auth) nonceMAC(payload string) string {
-	m := hmac.New(sha256.New, a.secret)
+func (a *Auth) nonceMAC(payload string) string {
+	m := hmac.New(sha256.New, a.Secret)
 	m.Write([]byte(payload))
 	return hex.EncodeToString(m.Sum(nil))
 }
@@ -88,8 +88,8 @@ type nonceRequest struct {
 	Address string `json:"address" binding:"required"`
 }
 
-// nonce issues a login nonce for an address (step 1 of wallet sign-in).
-func (a *auth) nonce(c *gin.Context) {
+// Nonce issues a login nonce for an address (step 1 of wallet sign-in).
+func (a *Auth) Nonce(c *gin.Context) {
 	var in nonceRequest
 	if err := c.ShouldBindJSON(&in); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -111,9 +111,9 @@ type walletRequest struct {
 	Token string `json:"token" binding:"required"`
 }
 
-// walletLogin verifies the signed nonce, then logs the wallet in (step 2):
+// WalletLogin verifies the signed nonce, then logs the wallet in (step 2):
 // upserts a user keyed by the address and issues a JWT carrying its namespace.
-func (a *auth) walletLogin(c *gin.Context) {
+func (a *Auth) WalletLogin(c *gin.Context) {
 	var in walletRequest
 	if err := c.ShouldBindJSON(&in); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -149,9 +149,9 @@ func (a *auth) walletLogin(c *gin.Context) {
 // returns its tenant namespace. The address is stored in the email column
 // (lowercased) so wallet and email users share one users table; password_hash
 // is empty since wallet users never password-login. Materializes the namespace.
-func (a *auth) ensureWalletUser(ctx context.Context, addr string) (string, error) {
+func (a *Auth) ensureWalletUser(ctx context.Context, addr string) (string, error) {
 	var ns string
-	err := a.pool.QueryRow(ctx, `SELECT namespace FROM users WHERE email = $1`, addr).Scan(&ns)
+	err := a.Pool.QueryRow(ctx, `SELECT namespace FROM users WHERE email = $1`, addr).Scan(&ns)
 	if err == nil {
 		return ns, a.ensureNamespace(ctx, ns)
 	}
@@ -163,11 +163,11 @@ func (a *auth) ensureWalletUser(ctx context.Context, addr string) (string, error
 	if err != nil {
 		return "", err
 	}
-	_, err = a.pool.Exec(ctx,
+	_, err = a.Pool.Exec(ctx,
 		`INSERT INTO users (email, password_hash, namespace) VALUES ($1, '', $2)`, addr, ns)
 	if isUniqueViolation(err) {
 		// Concurrent first login for the same wallet — re-read the winner's row.
-		if e := a.pool.QueryRow(ctx, `SELECT namespace FROM users WHERE email = $1`, addr).Scan(&ns); e != nil {
+		if e := a.Pool.QueryRow(ctx, `SELECT namespace FROM users WHERE email = $1`, addr).Scan(&ns); e != nil {
 			return "", e
 		}
 		return ns, a.ensureNamespace(ctx, ns)
@@ -178,10 +178,10 @@ func (a *auth) ensureWalletUser(ctx context.Context, addr string) (string, error
 	return ns, a.ensureNamespace(ctx, ns)
 }
 
-// ensureNamespace materializes the tenant namespace (idempotent), mirroring
-// what register does for email users.
-func (a *auth) ensureNamespace(ctx context.Context, ns string) error {
-	err := a.kube.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})
+// ensureNamespace materializes the tenant namespace (idempotent), mirroring what
+// Register does for email users.
+func (a *Auth) ensureNamespace(ctx context.Context, ns string) error {
+	err := a.Kube.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}

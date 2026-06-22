@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"bytes"
@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/shophub-devoops/shophub/backend/internal/grafana"
 )
 
 // testPool is a connection pool to a throwaway Postgres started once for the
@@ -50,7 +54,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("pool: %v", err)
 	}
-	if err := ensureUsersSchema(ctx, testPool); err != nil {
+	if err := EnsureUsersSchema(ctx, testPool); err != nil {
 		log.Fatalf("schema: %v", err)
 	}
 
@@ -61,29 +65,29 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// newTestAuth wires an auth against the shared Postgres and a fresh in-memory
+// newTestAuth wires an Auth against the shared Postgres and a fresh in-memory
 // fake kube client (so register can create tenant namespaces without a cluster).
-func newTestAuth(t *testing.T) *auth {
+func newTestAuth(t *testing.T) *Auth {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("scheme: %v", err)
 	}
-	return &auth{
-		pool:   testPool,
-		kube:   fake.NewClientBuilder().WithScheme(scheme).Build(),
-		secret: []byte("test-secret"),
+	return &Auth{
+		Pool:   testPool,
+		Kube:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Secret: []byte("test-secret"),
 	}
 }
 
 // router builds the HTTP surface under test: public auth routes plus a
 // middleware-protected probe that echoes the caller's namespace.
-func router(a *auth) *gin.Engine {
+func router(a *Auth) *gin.Engine {
 	r := gin.New()
 	api := r.Group("/api")
-	api.POST("/auth/register", a.register)
-	api.POST("/auth/login", a.login)
-	api.GET("/whoami", a.middleware(), func(c *gin.Context) {
+	api.POST("/auth/register", a.Register)
+	api.POST("/auth/login", a.Login)
+	api.GET("/whoami", a.Middleware(), func(c *gin.Context) {
 		c.String(http.StatusOK, nsFromCtx(c))
 	})
 	return r
@@ -168,12 +172,10 @@ func TestProtectedRouteRequiresValidToken(t *testing.T) {
 	a := newTestAuth(t)
 	r := router(a)
 
-	// No token → 401.
 	if w := do(r, http.MethodGet, "/api/whoami", "", nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("no-token = %d, want 401", w.Code)
 	}
 
-	// Register, then use the returned token → 200 echoing the tenant namespace.
 	reg := do(r, http.MethodPost, "/api/auth/register", "", creds("whoami@example.com"))
 	var resp struct{ Token, Namespace string }
 	_ = json.Unmarshal(reg.Body.Bytes(), &resp)
@@ -184,5 +186,112 @@ func TestProtectedRouteRequiresValidToken(t *testing.T) {
 	}
 	if got := w.Body.String(); got != resp.Namespace {
 		t.Fatalf("whoami namespace = %q, want %q", got, resp.Namespace)
+	}
+}
+
+// --- Grafana reprovision integration test -------------------------------------
+
+// fakeGrafanaState records org/user provisioning for the reprovision test.
+type fakeGrafanaState struct {
+	mu          sync.Mutex
+	orgsByName  map[string]int64
+	nextOrgID   int64
+	createdUser map[string]int64
+}
+
+func fakeGrafanaServer(f *fakeGrafanaState) *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/orgs/name/", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		name := strings.TrimPrefix(r.URL.Path, "/api/orgs/name/")
+		id, ok := f.orgsByName[name]
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "name": name})
+	})
+	mux.HandleFunc("/api/orgs", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		var body struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		id := f.nextOrgID
+		f.nextOrgID++
+		f.orgsByName[body.Name] = id
+		_ = json.NewEncoder(w).Encode(map[string]any{"orgId": id})
+	})
+	mux.HandleFunc("/api/admin/users", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		var body struct {
+			Login string `json:"login"`
+			OrgId int64  `json:"OrgId"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if _, exists := f.createdUser[body.Login]; exists {
+			http.Error(w, "user already exists", http.StatusPreconditionFailed)
+			return
+		}
+		f.createdUser[body.Login] = body.OrgId
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 100})
+	})
+	mux.HandleFunc("/api/orgs/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	return httptest.NewServer(mux)
+}
+
+// TestGrafanaInfoReprovisionsAfterWipe guards the ephemeral-Grafana case: a
+// Grafana restart wipes orgs and users, so /api/grafana must recreate the
+// tenant's account (with the stored, encrypted password) instead of returning
+// credentials for an account that no longer exists.
+func TestGrafanaInfoReprovisionsAfterWipe(t *testing.T) {
+	f := &fakeGrafanaState{orgsByName: map[string]int64{}, nextOrgID: 1, createdUser: map[string]int64{}}
+	srv := fakeGrafanaServer(f)
+	defer srv.Close()
+
+	t.Setenv("GRAFANA_URL", srv.URL)
+	t.Setenv("GRAFANA_EXTERNAL_URL", "http://grafana.example")
+	t.Setenv("GRAFANA_ADMIN_PASSWORD", "pw")
+
+	a := newTestAuth(t)
+	a.Grafana = grafana.NewProvisionerFromEnv()
+
+	r := gin.New()
+	r.POST("/api/auth/register", a.Register)
+	r.GET("/api/grafana", a.Middleware(), a.GrafanaInfo)
+
+	// Registration provisions the account.
+	w := do(r, http.MethodPost, "/api/auth/register", "", creds("wipe@test.local"))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register = %d (body: %s)", w.Code, w.Body.String())
+	}
+	var reg struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &reg); err != nil {
+		t.Fatalf("decode register: %v", err)
+	}
+
+	// Simulate a Grafana restart wiping its ephemeral database.
+	f.mu.Lock()
+	f.orgsByName = map[string]int64{}
+	f.createdUser = map[string]int64{}
+	f.mu.Unlock()
+
+	w = do(r, http.MethodGet, "/api/grafana", reg.Token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("grafanaInfo after wipe = %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.createdUser) != 1 {
+		t.Errorf("user not recreated after wipe: %+v", f.createdUser)
+	}
+	if len(f.orgsByName) != 1 {
+		t.Errorf("org not recreated after wipe: %+v", f.orgsByName)
 	}
 }
