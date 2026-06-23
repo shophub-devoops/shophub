@@ -376,6 +376,66 @@ function AdminCredsModal({ shop, onClose }: { shop: Shop; onClose: () => void })
   );
 }
 
+// ConfirmDeleteModal guards shop deletion: a destructive action that tears down
+// the storefront, its database, and all data, so it must not fire on a stray click.
+function ConfirmDeleteModal({
+  name,
+  onClose,
+  onConfirm,
+}: {
+  name: string;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function confirm() {
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm();
+    } catch (e) {
+      setError((e as Error).message.replace(/^\d+ [^:]+:\s*/, ''));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-6 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-card p-6">
+        <div className="flex items-center justify-between">
+          <h2 className="font-serif text-xl font-medium">Delete shop</h2>
+          <button onClick={onClose} className="text-faint hover:text-fg">
+            <X size={18} />
+          </button>
+        </div>
+        <p className="mt-2 text-sm text-muted">
+          Delete <span className="font-medium text-fg">{name}</span>? This permanently removes the
+          storefront, its database, and all of its data. This cannot be undone.
+        </p>
+        {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="inline-flex h-10 items-center rounded-lg border border-line px-4 text-sm text-muted transition-colors hover:text-fg disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={confirm}
+            disabled={busy}
+            className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-red-500/90 px-4 text-sm font-medium text-white transition-colors hover:bg-red-500 disabled:opacity-50"
+          >
+            <Trash2 size={15} /> {busy ? 'Deleting…' : 'Delete'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // MetricsModal shows the tenant's own Grafana access: a link plus the scoped
 // Viewer login that only sees this tenant's dashboards (spec 4.1 optional).
 function MetricsModal({ onClose }: { onClose: () => void }) {
@@ -439,6 +499,7 @@ export default function Dashboard() {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<Shop | null>(null);
   const [adminFor, setAdminFor] = useState<Shop | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [showMetrics, setShowMetrics] = useState(false);
   const navigate = useNavigate();
 
@@ -519,7 +580,7 @@ export default function Dashboard() {
         ) : (
           <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {shops.map((s) => (
-              <ShopCard key={s.name} shop={s} onEdit={setEditing} onDelete={remove} onAdmin={setAdminFor} />
+              <ShopCard key={s.name} shop={s} onEdit={setEditing} onDelete={setConfirmDelete} onAdmin={setAdminFor} />
             ))}
           </div>
         )}
@@ -528,6 +589,16 @@ export default function Dashboard() {
       {creating && <CreateModal onClose={() => setCreating(false)} onCreated={load} />}
       {editing && <EditModal shop={editing} onClose={() => setEditing(null)} onSaved={load} />}
       {adminFor && <AdminCredsModal shop={adminFor} onClose={() => setAdminFor(null)} />}
+      {confirmDelete && (
+        <ConfirmDeleteModal
+          name={confirmDelete}
+          onClose={() => setConfirmDelete(null)}
+          onConfirm={async () => {
+            await remove(confirmDelete);
+            setConfirmDelete(null);
+          }}
+        />
+      )}
       {showMetrics && <MetricsModal onClose={() => setShowMetrics(false)} />}
     </div>
   );
